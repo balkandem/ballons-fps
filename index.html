@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Balloon FPS</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { overflow:hidden; background:#000; font-family:system-ui,-apple-system,sans-serif; touch-action:none; }
+  #game { position:relative; width:100vw; height:100vh; }
+  canvas { display:block; width:100%; height:100%; }
+
+  #crosshair { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); width:24px; height:24px; pointer-events:none; z-index:10; }
+  #crosshair::before, #crosshair::after { content:''; position:absolute; background:rgba(255,255,255,0.9); }
+  #crosshair::before { width:24px; height:2px; top:11px; left:0; }
+  #crosshair::after { width:2px; height:24px; top:0; left:11px; }
+  #crosshair-dot { position:absolute; width:6px; height:6px; background:#ff4444; border-radius:50%; top:9px; left:9px; }
+
+  #ui { position:absolute; top:16px; left:16px; color:#fff; font-size:20px; font-weight:600; text-shadow:0 2px 6px rgba(0,0,0,0.7); z-index:10; pointer-events:none; }
+  #fpsLabel { position:absolute; bottom:20px; left:16px; background:rgba(0,0,0,0.5); color:#fff; padding:6px 14px; border-radius:6px; font-size:13px; z-index:10; pointer-events:none; }
+
+  #startScreen { position:absolute; inset:0; background:rgba(0,0,0,0.85); display:flex; flex-direction:column; align-items:center; justify-content:center; color:#fff; z-index:100; }
+  #startScreen h1 { font-size:40px; margin-bottom:10px; }
+  #startScreen p { font-size:16px; color:#ccc; margin:3px 0; }
+  #startScreen .highlight { color:#FFD700; font-weight:600; }
+  #startScreen .btn { margin-top:24px; padding:14px 40px; background:#4ECDC4; color:#000; border-radius:10px; font-size:20px; font-weight:700; cursor:pointer; border:none; }
+  #startScreen .btn:active { transform:scale(0.96); }
+  #startScreen .mobileHint { margin-top:12px; font-size:14px; color:#888; }
+
+  #touchUI { position:absolute; inset:0; z-index:15; pointer-events:none; display:none; }
+  .joy-area { position:absolute; bottom:70px; left:20px; width:130px; height:130px; pointer-events:auto; }
+  .joy-bg { position:absolute; inset:0; border:2px solid rgba(255,255,255,0.25); border-radius:50%; background:rgba(255,255,255,0.08); }
+  .joy-knob { position:absolute; width:44px; height:44px; background:rgba(255,255,255,0.45); border-radius:50%; top:50%; left:50%; transform:translate(-50%,-50%); transition:none; }
+  .look-area { position:absolute; top:0; right:0; width:55%; height:100%; pointer-events:auto; }
+  .fire-btn { position:absolute; bottom:90px; right:24px; width:72px; height:72px; pointer-events:auto; border-radius:50%; background:rgba(231,76,60,0.65); border:2px solid rgba(255,255,255,0.3); display:flex; align-items:center; justify-content:center; font-size:26px; color:#fff; }
+  .fire-btn:active { background:rgba(231,76,60,0.95); transform:scale(0.93); }
+</style>
+</head>
+<body>
+<div id="game">
+  <canvas id="canvas"></canvas>
+  <div id="crosshair"><div id="crosshair-dot"></div></div>
+  <div id="ui">Skor: <span id="scoreVal">0</span></div>
+  <div id="fpsLabel">FPS Gameplay</div>
+
+  <div id="startScreen">
+    <h1>🎈 Balloon FPS</h1>
+    <p><span class="highlight">WASD</span> hareket · <span class="highlight">Fare</span> bakış</p>
+    <p><span class="highlight">Sol Tık</span> ateş et</p>
+    <p class="mobileHint">Telefon: Joystick + sağ ekran + 🔥 butonu</p>
+    <button class="btn" id="startBtn">▶ Oyna</button>
+  </div>
+
+  <div id="touchUI">
+    <div class="joy-area" id="joyArea"><div class="joy-bg"></div><div class="joy-knob" id="joyKnob"></div></div>
+    <div class="look-area" id="lookArea"></div>
+    <div class="fire-btn" id="fireBtn">🔥</div>
+  </div>
+</div>
+
+<script>
+(function(){
+  'use strict';
+
+  // ===== CANVAS SETUP =====
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+  const scoreEl = document.getElementById('scoreVal');
+  const startScreen = document.getElementById('startScreen');
+  const startBtn = document.getElementById('startBtn');
+  const touchUI = document.getElementById('touchUI');
+  const joyArea = document.getElementById('joyArea');
+  const joyKnob = document.getElementById('joyKnob');
+  const lookArea = document.getElementById('lookArea');
+  const fireBtn = document.getElementById('fireBtn');
+
+  let W, H;
+  function resize(){
+    W = window.innerWidth;
+    H = window.innerHeight;
+    canvas.width = W;
+    canvas.height = H;
+  }
+  resize();
+  window.addEventListener('resize', resize);
+
+  // ===== GAME CONSTANTS =====
+  const TILE = 64;
+  const FOV = Math.PI / 3;
+  const PROJ_PLANE = 0.8;
+
+  const MAP = [
+    [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+    [1,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+    [1,0,2,2,0,0,3,3,0,0,4,4,0,0,1],
+    [1,0,2,2,0,0,3,3,0,0,4,4,0,0,1],
+    [1,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+    [1,0,5,5,0,0,6,6,0,0,1,1,0,0,1],
+    [1,0,5,5,0,0,6,6,0,0,1,1,0,0,1],
+    [1,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+    [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+  ];
+
+  const WALL_COLORS = {
+    1:'#FF6B9D', 2:'#4ECDC4', 3:'#FFE66D',
+    4:'#95E1D3', 5:'#FFA07A', 6:'#C7CEEA',
+  };
+
+  // ===== PLAYER =====
+  const player = { x: 110, y: 110, angle: 0.5, speed: 2.2 };
+
+  // ===== ENEMIES =====
+  let enemies = [];
+  function spawnEnemy(){
+    for(let i=0; i<30; i++){
+      let mx = Math.floor(Math.random()*13)+1;
+      let mz = Math.floor(Math.random()*7)+1;
+      if(MAP[mz][mx] === 0){
+        let ex = mx*TILE + TILE/2;
+        let ez = mz*TILE + TILE/2;
+        if(Math.hypot(ex-player.x, ez-player.y) > 100){
+          enemies.push({ x:ex, z:ez, alive:true, bob:Math.random()*6.28, color:'#E74C3C' });
+          return;
+        }
+      }
+    }
+  }
+  for(let i=0; i<5; i++) spawnEnemy();
+
+  let score = 0;
+  let fireTimer = 0;
+  let frame = 0;
+  let gameRunning = false;
+
+  // ===== INPUT =====
+  const keys = {};
+  document.addEventListener('keydown', e => { keys[e.key.toLowerCase()] = true; });
+  document.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+
+  // Mouse look (desktop)
+  let mouseLocked = false;
+  canvas.addEventListener('click', () => {
+    if(!mouseLocked && gameRunning && !isMobile){
+      canvas.requestPointerLock && canvas.requestPointerLock();
+    }
+  });
+  document.addEventListener('pointerlockchange', () => {
+    mouseLocked = document.pointerLockElement === canvas;
+  });
+  document.addEventListener('mousemove', e => {
+    if(mouseLocked && gameRunning){
+      player.angle -= e.movementX * 0.003;
+    }
+  });
+
+  // Shooting (desktop)
+  document.addEventListener('mousedown', e => {
+    if(e.button === 0 && mouseLocked && gameRunning) doShoot();
+  });
+
+  // Mobile detection
+  const isMobile = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+
+  // Touch joystick
+  let joyActive = false;
+  let joyVec = { x:0, y:0 };
+
+  function getJoyPos(touch){
+    const rect = joyArea.getBoundingClientRect();
+    return { x: touch.clientX - rect.left - rect.width/2, y: touch.clientY - rect.top - rect.height/2 };
+  }
+
+  joyArea.addEventListener('touchstart', e => {
+    e.preventDefault();
+    joyActive = true;
+    updateJoy(e.touches[0]);
+  }, {passive:false});
+
+  joyArea.addEventListener('touchmove', e => {
+    e.preventDefault();
+    if(!joyActive) return;
+    updateJoy(e.touches[0]);
+  }, {passive:false});
+
+  function updateJoy(touch){
+    const pos = getJoyPos(touch);
+    const max = 40;
+    const d = Math.sqrt(pos.x*pos.x + pos.y*pos.y);
+    const c = d > max ? max : d;
+    const a = Math.atan2(pos.y, pos.x);
+    const nx = Math.cos(a)*c, ny = Math.sin(a)*c;
+    joyKnob.style.transform = `translate(calc(-50% + ${nx}px), calc(-50% + ${ny}px))`;
+    joyVec = { x: nx/max, y: ny/max };
+  }
+
+  joyArea.addEventListener('touchend', e => {
+    e.preventDefault();
+    joyActive = false;
+    joyVec = { x:0, y:0 };
+    joyKnob.style.transform = 'translate(-50%,-50%)';
+  }, {passive:false});
+
+  // Touch look
+  let lookActive = false;
+  let lookStart = { x:0, y:0 };
+
+  lookArea.addEventListener('touchstart', e => {
+    e.preventDefault();
+    lookActive = true;
+    lookStart = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+  }, {passive:false});
+
+  lookArea.addEventListener('touchmove', e => {
+    e.preventDefault();
+    if(!lookActive || !gameRunning) return;
+    const t = e.touches[0];
+    const dx = t.clientX - lookStart.x;
+    const dy = t.clientY - lookStart.y;
+    lookStart = { x: t.clientX, y: t.clientY };
+    player.angle -= dx * 0.004;
+  }, {passive:false});
+
+  lookArea.addEventListener('touchend', e => {
+    e.preventDefault();
+    lookActive = false;
+  }, {passive:false});
+
+  // Fire button
+  fireBtn.addEventListener('touchstart', e => {
+    e.preventDefault();
+    if(gameRunning) doShoot();
+  }, {passive:false});
+
+  // ===== START GAME =====
+  function startGame(){
+    gameRunning = true;
+    startScreen.style.display = 'none';
+    if(isMobile){
+      touchUI.style.display = 'block';
+    }
+    loop();
+  }
+
+  startBtn.addEventListener('click', startGame);
+  startBtn.addEventListener('touchstart', e => {
+    e.preventDefault();
+    startGame();
+  }, {passive:false});
+  startScreen.addEventListener('touchstart', e => {
+    e.preventDefault();
+    startGame();
+  }, {passive:false});
+
+  // ===== RAYCASTING =====
+  function castRay(angle){
+    let dx = Math.cos(angle), dz = Math.sin(angle);
+    let x = player.x, z = player.y;
+    for(let i=0; i<500; i+=0.5){
+      x += dx*0.5; z += dz*0.5;
+      let mx = Math.floor(x/TILE), mz = Math.floor(z/TILE);
+      if(mz<0 || mz>=MAP.length || mx<0 || mx>=MAP[0].length) return { dist:i, hit:false };
+      if(MAP[mz][mx] > 0) return { dist:i, mx, mz, hit:true };
+    }
+    return { dist:500, hit:false };
+  }
+
+  function canWalk(x, z){
+    let mx = Math.floor(x/TILE), mz = Math.floor(z/TILE);
+    return mz>=0 && mz<MAP.length && mx>=0 && mx<MAP[0].length && MAP[mz][mx] === 0;
+  }
+
+  // ===== SHOOTING =====
+  function doShoot(){
+    if(fireTimer > 0) return;
+    fireTimer = 10;
+
+    let bestDist = Infinity, best = null;
+    enemies.forEach(e => {
+      if(!e.alive) return;
+      let dx = e.x - player.x, dz = e.z - player.y;
+      let dist = Math.hypot(dx, dz);
+      let ang = Math.atan2(dz, dx);
+      let diff = ang - player.angle;
+      while(diff > Math.PI) diff -= 2*Math.PI;
+      while(diff < -Math.PI) diff += 2*Math.PI;
+
+      if(Math.abs(diff) < 0.12 && dist < 400){
+        let wall = castRay(ang);
+        if(wall.hit && wall.dist < dist) return;
+        if(dist < bestDist){ bestDist = dist; best = e; }
+      }
+    });
+
+    if(best){
+      best.alive = false;
+      score++;
+      scoreEl.textContent = score;
+      setTimeout(() => spawnEnemy(), 2000);
+    }
+  }
+
+  // ===== UPDATE =====
+  function update(){
+    frame++;
+    let spd = player.speed;
+    if(keys['shift']) spd *= 1.5;
+
+    let mx = 0, mz = 0;
+    if(keys['w']){ mx += Math.cos(player.angle); mz += Math.sin(player.angle); }
+    if(keys['s']){ mx -= Math.cos(player.angle); mz -= Math.sin(player.angle); }
+    if(keys['a']){ mx += Math.cos(player.angle - Math.PI/2); mz += Math.sin(player.angle - Math.PI/2); }
+    if(keys['d']){ mx += Math.cos(player.angle + Math.PI/2); mz += Math.sin(player.angle + Math.PI/2); }
+
+    if(isMobile && joyActive){
+      mx += joyVec.x * 2.5;
+      mz += joyVec.y * 2.5;
+    }
+
+    if(mx !== 0 || mz !== 0){
+      let len = Math.hypot(mx, mz);
+      mx = (mx/len) * spd;
+      mz = (mz/len) * spd;
+      if(canWalk(player.x + mx, player.y)) player.x += mx;
+      if(canWalk(player.x, player.y + mz)) player.y += mz;
+    }
+
+    // Enemy AI
+    enemies.forEach(e => {
+      if(!e.alive) return;
+      let dx = player.x - e.x, dz = player.y - e.z;
+      let dist = Math.hypot(dx, dz);
+      if(dist > 30 && dist < 400){
+        let sp = 0.6;
+        let nx = e.x + (dx/dist)*sp, nz = e.z + (dz/dist)*sp;
+        let emx = Math.floor(nx/TILE), emz = Math.floor(nz/TILE);
+        if(emz>=0 && emz<MAP.length && emx>=0 && emx<MAP[0].length && MAP[emz][emx] === 0){
+          e.x = nx; e.z = nz;
+        }
+      }
+      e.bob += 0.06;
+    });
+
+    let alive = enemies.filter(e => e.alive).length;
+    if(alive < 3 && Math.random() < 0.02) spawnEnemy();
+    if(fireTimer > 0) fireTimer--;
+  }
+
+  // ===== RENDER =====
+  function render(){
+    const PROJ = (W/2) / Math.tan(FOV/2);
+
+    // Sky
+    const skyGrad = ctx.createLinearGradient(0, 0, 0, H*0.55);
+    skyGrad.addColorStop(0, '#87CEEB');
+    skyGrad.addColorStop(0.6, '#B0E0E6');
+    skyGrad.addColorStop(1, '#E0F7FA');
+    ctx.fillStyle = skyGrad;
+    ctx.fillRect(0, 0, W, H*0.55);
+
+    // Clouds
+    ctx.fillStyle = 'rgba(255,255,255,0.6)';
+    const t = frame * 0.3;
+    for(let i=0; i<4; i++){
+      let cx = ((t + i*200) % (W+300)) - 150;
+      let cy = 25 + Math.sin(i*2.5)*15;
+      ctx.beginPath(); ctx.arc(cx, cy, 22, 0, Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(cx+18, cy+4, 18, 0, Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(cx-16, cy+2, 16, 0, Math.PI*2); ctx.fill();
+    }
+
+    // Floor
+    const floorGrad = ctx.createLinearGradient(0, H*0.5, 0, H);
+    floorGrad.addColorStop(0, '#4CAF50');
+    floorGrad.addColorStop(1, '#1B5E20');
+    ctx.fillStyle = floorGrad;
+    ctx.fillRect(0, H*0.5, W, H*0.5);
+
+    // Floor grid
+    ctx.strokeStyle = 'rgba(0,60,0,0.1)';
+    ctx.lineWidth = 1;
+    for(let i=1; i<20; i++){
+      let y = H*0.5 + i*i*0.9;
+      if(y > H) break;
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+    }
+
+    const zBuf = new Array(Math.ceil(W/2)).fill(9999);
+
+    // Walls (balloon columns)
+    for(let x=0; x<W; x+=2){
+      let rayAngle = player.angle - FOV/2 + (x/W)*FOV;
+      let hit = castRay(rayAngle);
+      zBuf[Math.floor(x/2)] = hit.dist;
+      if(!hit.hit) continue;
+
+      let wallH = (TILE/hit.dist) * PROJ;
+      let wallTop = (H - wallH)/2;
+      let color = WALL_COLORS[MAP[hit.mz][hit.mx]] || '#888';
+      let bright = Math.max(0.25, Math.min(1, 1 - hit.dist/500));
+
+      let r = parseInt(color.slice(1,3),16), g = parseInt(color.slice(3,5),16), b = parseInt(color.slice(5,7),16);
+      ctx.fillStyle = `rgb(${Math.floor(r*bright)},${Math.floor(g*bright)},${Math.floor(b*bright)})`;
+      ctx.fillRect(x, wallTop, 2, wallH);
+
+      // Balloon highlights on wall
+      ctx.fillStyle = `rgba(255,255,255,${0.12*bright})`;
+      let bx = x + (x%12);
+      let by = wallTop + ((x*7)%Math.floor(wallH));
+      ctx.beginPath(); ctx.arc(bx, by, 3*bright, 0, Math.PI*2); ctx.fill();
+    }
+
+    // Draw 3x3 balloon decorations on each wall tile
+    for(let mz=0; mz<MAP.length; mz++){
+      for(let mx=0; mx<MAP[0].length; mx++){
+        if(MAP[mz][mx] === 0) continue;
+        let wx = mx*TILE, wz = mz*TILE;
+        let dx = wx - player.x, dz = wz - player.y;
+        let dist = Math.hypot(dx, dz);
+        let angle = Math.atan2(dz, dx);
+        let rel = angle - player.angle;
+        while(rel > Math.PI) rel -= 2*Math.PI;
+        while(rel < -Math.PI) rel += 2*Math.PI;
+        if(Math.abs(rel) > FOV/2 || dist < 15) continue;
+
+        let sx = W/2 + (rel/(FOV/2))*(W/2);
+        let size = (TILE/dist)*PROJ*0.55;
+        let bright = Math.max(0.3, 1-dist/500);
+        let color = WALL_COLORS[MAP[mz][mx]];
+
+        for(let by=-1; by<=1; by++){
+          for(let bxx=-1; bxx<=1; bxx++){
+            let br = size*0.18;
+            let px = sx + bxx*size*0.32;
+            let py = (H-size)/2 + by*size*0.32;
+            if(br < 2) continue;
+
+            // Balloon body
+            ctx.fillStyle = color;
+            ctx.globalAlpha = bright;
+            ctx.beginPath(); ctx.arc(px, py, br, 0, Math.PI*2); ctx.fill();
+
+            // Highlight
+            ctx.fillStyle = 'rgba(255,255,255,0.3)';
+            ctx.beginPath(); ctx.arc(px-br*0.25, py-br*0.25, br*0.3, 0, Math.PI*2); ctx.fill();
+
+            // Shadow
+            ctx.fillStyle = 'rgba(0,0,0,0.15)';
+            ctx.beginPath(); ctx.arc(px+br*0.2, py+br*0.2, br*0.25, 0, Math.PI*2); ctx.fill();
+            ctx.globalAlpha = 1;
+          }
+        }
+      }
+    }
+
+    // Enemies
+    let visible = enemies.filter(e => e.alive).map(e => {
+      let dx = e.x - player.x, dz = e.z - player.y;
+      let dist = Math.hypot(dx, dz);
+      let angle = Math.atan2(dz, dx);
+      let rel = angle - player.angle;
+      while(rel > Math.PI) rel -= 2*Math.PI;
+      while(rel < -Math.PI) rel += 2*Math.PI;
+      return { e, dist, rel };
+    }).filter(v => Math.abs(v.rel) < FOV/2 && v.dist > 10);
+
+    visible.sort((a,b) => b.dist - a.dist);
+
+    visible.forEach(({e, dist, rel}) => {
+      let sx = W/2 + (rel/(FOV/2))*(W/2);
+      let size = (TILE/dist)*PROJ*0.65;
+      let zi = Math.floor(sx/2);
+      if(zi >= 0 && zi < zBuf.length && dist > zBuf[zi]*0.85) return;
+
+      let bright = Math.max(0.3, 1-dist/500);
+      let bob = Math.sin(e.bob)*size*0.06;
+      let y = H/2 + size*0.2 + bob;
+
+      // Shadow
+      ctx.fillStyle = `rgba(0,0,0,${0.25*bright})`;
+      ctx.beginPath(); ctx.ellipse(sx, y+size*0.42, size*0.3, size*0.06, 0, 0, Math.PI*2); ctx.fill();
+
+      // Legs
+      ctx.fillStyle = `rgba(60,40,20,${bright})`;
+      ctx.fillRect(sx-size*0.1, y, size*0.08, size*0.22);
+      ctx.fillRect(sx+size*0.02, y, size*0.08, size*0.22);
+
+      // Boots
+      ctx.fillStyle = `rgba(30,20,10,${bright})`;
+      ctx.fillRect(sx-size*0.12, y+size*0.18, size*0.1, size*0.06);
+      ctx.fillRect(sx, y+size*0.18, size*0.1, size*0.06);
+
+      // Body (uniform)
+      ctx.fillStyle = `rgba(107,142,35,${bright})`;
+      ctx.beginPath();
+      ctx.moveTo(sx-size*0.16, y+size*0.05);
+      ctx.lineTo(sx+size*0.16, y+size*0.05);
+      ctx.lineTo(sx+size*0.13, y-size*0.12);
+      ctx.lineTo(sx-size*0.13, y-size*0.12);
+      ctx.closePath(); ctx.fill();
+
+      // Belt
+      ctx.fillStyle = `rgba(80,50,20,${bright})`;
+      ctx.fillRect(sx-size*0.14, y, size*0.28, size*0.035);
+
+      // Arms
+      ctx.fillStyle = `rgba(107,142,35,${bright})`;
+      ctx.fillRect(sx-size*0.26, y-size*0.08, size*0.09, size*0.16);
+      ctx.fillRect(sx+size*0.17, y-size*0.08, size*0.09, size*0.16);
+
+      // Hands
+      ctx.fillStyle = `rgba(245,200,150,${bright})`;
+      ctx.beginPath(); ctx.arc(sx-size*0.26, y+size*0.1, size*0.045, 0, Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(sx+size*0.26, y+size*0.1, size*0.045, 0, Math.PI*2); ctx.fill();
+
+      // Head
+      ctx.fillStyle = `rgba(245,200,150,${bright})`;
+      ctx.beginPath(); ctx.arc(sx, y-size*0.22, size*0.13, 0, Math.PI*2); ctx.fill();
+
+      // Helmet
+      ctx.fillStyle = `rgba(85,107,47,${bright})`;
+      ctx.beginPath(); ctx.arc(sx, y-size*0.25, size*0.14, Math.PI, 0); ctx.fill();
+      ctx.fillRect(sx-size*0.14, y-size*0.25, size*0.28, size*0.035);
+
+      // Eyes
+      ctx.fillStyle = `rgba(30,30,30,${bright})`;
+      ctx.beginPath(); ctx.arc(sx-size*0.05, y-size*0.22, size*0.022, 0, Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(sx+size*0.05, y-size*0.22, size*0.022, 0, Math.PI*2); ctx.fill();
+
+      // Red cross on back
+      ctx.fillStyle = `rgba(220,50,50,${bright})`;
+      let cs = size*0.05;
+      ctx.fillRect(sx-cs*0.3, y-size*0.02, cs*0.6, cs);
+      ctx.fillRect(sx-cs*0.1, y-size*0.06, cs*0.2, cs*1.4);
+    });
+
+    // Gun
+    let recoil = fireTimer > 0 ? 12 : 0;
+    let sway = Math.sin(frame*0.04)*3;
+    let gw = Math.min(100, W*0.13);
+    let gh = gw*1.4;
+    let gx = W/2 - gw/2 + sway;
+    let gy = H - gh + 15 - recoil;
+
+    // Gun shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.12)';
+    ctx.beginPath();
+    ctx.moveTo(gx+gw*0.1, gy+gh); ctx.lineTo(gx+gw*0.9, gy+gh);
+    ctx.lineTo(gx+gw*0.95, gy+gh+6); ctx.lineTo(gx+gw*0.05, gy+gh+6);
+    ctx.closePath(); ctx.fill();
+
+    // Gun body (blue)
+    ctx.fillStyle = '#2980B9';
+    ctx.beginPath();
+    ctx.moveTo(gx+gw*0.12, gy+gh);
+    ctx.lineTo(gx+gw*0.22, gy+gh*0.28);
+    ctx.lineTo(gx+gw*0.35, gy);
+    ctx.lineTo(gx+gw*0.65, gy);
+    ctx.lineTo(gx+gw*0.78, gy+gh*0.28);
+    ctx.lineTo(gx+gw*0.88, gy+gh);
+    ctx.closePath(); ctx.fill();
+
+    // Barrel (yellow)
+    ctx.fillStyle = '#F39C12';
+    ctx.fillRect(gx+gw*0.38, gy-18, gw*0.24, 20);
+    ctx.fillStyle = '#E67E22';
+    ctx.fillRect(gx+gw*0.36, gy-20, gw*0.28, 3);
+
+    // Grip (red)
+    ctx.fillStyle = '#E74C3C';
+    ctx.fillRect(gx+gw*0.42, gy+gh*0.32, gw*0.16, gh*0.38);
+
+    // Grip lines
+    ctx.strokeStyle = 'rgba(0,0,0,0.15)'; ctx.lineWidth = 1;
+    for(let i=0; i<3; i++){
+      ctx.beginPath(); ctx.moveTo(gx+gw*0.42, gy+gh*0.38+i*gh*0.1); ctx.lineTo(gx+gw*0.58, gy+gh*0.38+i*gh*0.1); ctx.stroke();
+    }
+
+    // Muzzle flash
+    if(fireTimer > 0){
+      ctx.globalAlpha = 0.7;
+      ctx.fillStyle = '#FFD700';
+      ctx.beginPath();
+      ctx.moveTo(gx+gw*0.35, gy-18);
+      ctx.lineTo(gx+gw*0.5, gy-48-Math.random()*12);
+      ctx.lineTo(gx+gw*0.65, gy-18);
+      ctx.closePath(); ctx.fill();
+      ctx.fillStyle = '#FF6B35';
+      ctx.beginPath();
+      ctx.moveTo(gx+gw*0.4, gy-18);
+      ctx.lineTo(gx+gw*0.5, gy-38-Math.random()*8);
+      ctx.lineTo(gx+gw*0.6, gy-18);
+      ctx.closePath(); ctx.fill();
+      ctx.fillStyle = '#FFF';
+      ctx.beginPath(); ctx.arc(gx+gw*0.5, gy-35, 6, 0, Math.PI*2); ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+
+    // Crosshair
+    ctx.strokeStyle = 'rgba(255,255,255,0.9)'; ctx.lineWidth = 2;
+    let cx = W/2, cy = H/2;
+    ctx.beginPath(); ctx.moveTo(cx-14, cy); ctx.lineTo(cx+14, cy); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(cx, cy-14); ctx.lineTo(cx, cy+14); ctx.stroke();
+    ctx.fillStyle = '#ff4444';
+    ctx.beginPath(); ctx.arc(cx, cy, 3, 0, Math.PI*2); ctx.fill();
+  }
+
+  // ===== LOOP =====
+  function loop(){
+    if(!gameRunning) return;
+    update();
+    render();
+    requestAnimationFrame(loop);
+  }
+
+  // Initial render (start screen background)
+  render();
+
+})();
+</script>
+</body>
+</html>
